@@ -12,11 +12,20 @@ Telegram bot (aiogram 3) that creates VPN clients on remote servers over SSH (as
 python -m venv .venv
 .venv\Scripts\activate            # Linux: source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env              # fill in BOT_TOKEN, ALLOWED_USER_IDS, SSH_*
+cp .env.example .env              # fill in BOT_TOKEN, ALLOWED_USER_IDS, SSH_* and/or AMNEZIA_*
 python bot.py
 ```
 
-There are no tests, linter config or build step. Running the bot requires a real Telegram token and an SSH-reachable WireGuard server.
+There are no tests, linter config or build step. Running the bot requires a real Telegram token and at least one SSH-reachable server (WireGuard or Amnezia). Python 3.10+ (`X | None` annotations).
+
+## Deployment
+
+The README's «Установка и запуск как службы» section is the user-facing install guide: production runs as a systemd unit `wg-bot.service` from `/opt/wg-bot` (venv in `.venv`, `.env` and SSH key in `.ssh/` there) under an unprivileged system user `wgbot`, with `Restart=always` and hardening (`ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `NoNewPrivileges=true`). Keep it in sync with the code:
+
+- The unit forbids local disk writes, which works because the bot keeps everything in memory (configs/QR via `BufferedInputFile`, FSM in the `Dispatcher()` default in-memory storage). If a change makes the bot write files locally, update the unit in the README (e.g. `ReadWritePaths=`).
+- New env vars go into `.env.example` (documented there, in Russian); the README points to it rather than listing every variable. `ALLOWED_USER_IDS` is required, so the README's first-run step uses a placeholder `0` until the user learns their ID from the access-denied reply.
+- The README's troubleshooting list quotes the exact error strings from `config.py`/`vpn_common.py` (`Переменная окружения … не задана`, `Укажите …SSH_PASSWORD или …SSH_KEY_PATH`, `Ошибка SSH (...)`). Update it if those messages change.
+- Remote commands for a non-root SSH user are prefixed with `sudo -n`, so the README's sudoers example covers `bash` (WireGuard) and `docker` (Amnezia). Update it if the remote command changes.
 
 ## Architecture
 
