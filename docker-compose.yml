@@ -1,0 +1,26 @@
+services:
+  wg-bot:
+    build: .
+    image: wg-bot
+    container_name: wg-bot
+    restart: unless-stopped
+    # Переменные из .env передаются в контейнер; сам файл в образ не попадает
+    env_file: .env
+    # Сеть хоста: бот на том же VPS подключается к SSH по 127.0.0.1, как и без Docker
+    network_mode: host
+    volumes:
+      # SSH-ключ и known_hosts (пути в .env: /opt/wg-bot/.ssh/...)
+      - ./.ssh:/opt/wg-bot/.ssh:ro
+    # Ограничения: бот всё хранит в памяти и не нуждается в привилегиях
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

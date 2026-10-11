@@ -1,0 +1,7 @@
+.env
+.ssh/
+.git/
+.venv/
+venv/
+__pycache__/
+*.md
