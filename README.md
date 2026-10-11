@@ -135,7 +135,264 @@ Amnezia не хранит приватные ключи клиентов, поэ
 - После выполнения действия диалог завершается. Для следующего клиента нужно снова
   отправить `/new`.
 
-## Установка
+## Установка и запуск как службы
+
+Рекомендуемый способ — запустить бота на Linux-сервере как службу systemd. Тогда бот
+стартует вместе с системой, сам перезапускается после сбоев, а его логи пишутся в журнал
+systemd.
+
+Бот может работать где угодно, откуда есть доступ к Telegram и SSH-доступ к VPN-серверам.
+Проще всего поставить его на тот же VPS, где установлен WireGuard или Amnezia, — тогда бот
+подключается к `127.0.0.1`. Ниже все команды выполняются от `root` на Debian/Ubuntu; бот
+ставится в `/opt/wg-bot` и работает от отдельного непривилегированного пользователя
+`wgbot`.
+
+### Требования
+
+- Linux с systemd (Debian 11+, Ubuntu 22.04+ и т. п.);
+- Python 3.10 или новее (`python3 --version`);
+- сервер с WireGuard (через `wireguard-install.sh`) и/или Amnezia VPN, к которому есть
+  SSH-доступ под `root` или под пользователем с `sudo` без пароля;
+- исходящий доступ к `api.telegram.org` (бот работает через long polling, входящие порты
+  открывать не нужно).
+
+### Шаг 1. Создайте бота в Telegram
+
+1. Откройте [@BotFather](https://t.me/BotFather), отправьте `/newbot` и задайте имя.
+2. Сохраните токен вида `123456789:AAAA...` — он понадобится для `BOT_TOKEN`.
+
+Свой Telegram ID пока знать не нужно: бот покажет его сам на шаге 5.
+
+### Шаг 2. Скачайте бота и установите зависимости
+
+```bash
+apt update && apt install -y git python3 python3-venv
+
+git clone https://github.com/ierehon91/CustomVpnTelegramManager.git /opt/wg-bot
+cd /opt/wg-bot
+
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Создайте системного пользователя, от которого будет работать служба:
+
+```bash
+useradd --system --home-dir /opt/wg-bot --shell /usr/sbin/nologin wgbot
+```
+
+### Шаг 3. Настройте SSH-доступ к VPN-серверу
+
+Бот подключается к серверу по SSH. Можно указать пароль (`SSH_PASSWORD`), но надёжнее
+отдельный ключ без парольной фразы:
+
+```bash
+mkdir -p /opt/wg-bot/.ssh
+ssh-keygen -t ed25519 -N "" -C wg-bot -f /opt/wg-bot/.ssh/id_ed25519
+```
+
+Добавьте публичный ключ на VPN-сервер:
+
+```bash
+# бот на том же сервере
+cat /opt/wg-bot/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys
+
+# бот на другой машине
+ssh-copy-id -i /opt/wg-bot/.ssh/id_ed25519.pub root@1.2.3.4
+```
+
+Для входа под `root` по ключу в `/etc/ssh/sshd_config` на VPN-сервере должно быть
+`PermitRootLogin prohibit-password` (или `yes`). На большинстве дистрибутивов это значение
+по умолчанию.
+
+Сохраните ключ сервера в `known_hosts`, чтобы бот проверял, что подключается именно к нему:
+
+```bash
+ssh-keyscan -p 22 1.2.3.4 > /opt/wg-bot/.ssh/known_hosts      # или 127.0.0.1
+ssh-keygen -lf /opt/wg-bot/.ssh/known_hosts                   # сверьте отпечатки
+```
+
+`ssh-keyscan` ничего не проверяет сам — сравните отпечатки с выводом
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` на VPN-сервере. Если серверов два
+(WireGuard и Amnezia), добавьте оба в один файл через `>>`.
+
+Проверьте, что подключение работает:
+
+```bash
+ssh -i /opt/wg-bot/.ssh/id_ed25519 -o UserKnownHostsFile=/opt/wg-bot/.ssh/known_hosts \
+    root@1.2.3.4 'wg show interfaces'
+```
+
+#### Если SSH-пользователь не root
+
+Бот выполняет команды через `sudo -n`, поэтому пользователю нужен `sudo` без пароля:
+для WireGuard — на `bash` (скрипт работает с `/etc/wireguard`), для Amnezia — на `docker`.
+Например, для пользователя `vpnadmin` создайте `/etc/sudoers.d/wg-bot` командой
+`visudo -f /etc/sudoers.d/wg-bot`:
+
+```
+vpnadmin ALL=(root) NOPASSWD: /usr/bin/bash, /usr/bin/docker
+```
+
+Оставьте только нужную строку. Учтите, что `sudo bash` фактически даёт полный доступ
+`root`, так что такой пользователь не безопаснее самого `root`.
+
+### Шаг 4. Заполните `.env`
+
+```bash
+cp /opt/wg-bot/.env.example /opt/wg-bot/.env
+nano /opt/wg-bot/.env
+```
+
+Все переменные описаны в [`.env.example`](.env.example). Пример для бота на том же VPS,
+где WireGuard установлен через `wireguard-install.sh`:
+
+```ini
+BOT_TOKEN=123456789:AAAA...
+ALLOWED_USER_IDS=0               # свой ID впишете на шаге 5
+
+SSH_HOST=127.0.0.1
+SSH_PORT=22
+SSH_USER=root
+SSH_KEY_PATH=/opt/wg-bot/.ssh/id_ed25519
+SSH_KNOWN_HOSTS=/opt/wg-bot/.ssh/known_hosts
+WG_CLIENTS_DIR=/root
+WG_SERVER_NAME=WireGuard
+```
+
+Для сервера Amnezia заполните блок `AMNEZIA_*` так же. Обратите внимание на
+`AMNEZIA_ENDPOINT`: если бот подключается к Amnezia по `127.0.0.1`, укажите здесь внешний
+IP или домен сервера, иначе в клиентских конфигах окажется `127.0.0.1`. Если какой-то сервер
+не нужен, оставьте пустым его `SSH_HOST` / `AMNEZIA_SSH_HOST`.
+
+`.env` содержит токен бота и, возможно, SSH-пароль, поэтому закройте его и ключ от чужих
+глаз и отдайте каталог пользователю службы:
+
+```bash
+chown -R wgbot:wgbot /opt/wg-bot
+chmod 700 /opt/wg-bot/.ssh
+chmod 600 /opt/wg-bot/.env /opt/wg-bot/.ssh/id_ed25519
+```
+
+### Шаг 5. Первый запуск и Telegram ID
+
+Запустите бота вручную от пользователя службы — так сразу видно ошибки настройки:
+
+```bash
+cd /opt/wg-bot
+sudo -u wgbot .venv/bin/python bot.py
+```
+
+Если в логе нет ошибок и есть строка `Start polling`, напишите боту что-нибудь в Telegram.
+Он ответит «⛔ Доступ запрещён» и покажет ваш Telegram ID. Остановите бота (`Ctrl+C`),
+замените `0` в `ALLOWED_USER_IDS` на свой ID (несколько ID — через запятую) и переходите к службе.
+
+### Шаг 6. Создайте службу systemd
+
+Создайте файл `/etc/systemd/system/wg-bot.service`:
+
+```ini
+[Unit]
+Description=WireGuard / Amnezia Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=wgbot
+Group=wgbot
+WorkingDirectory=/opt/wg-bot
+ExecStart=/opt/wg-bot/.venv/bin/python bot.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+# Ограничения: бот не пишет на диск и не нуждается в привилегиях
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Что здесь важно:
+
+- `WorkingDirectory` — бот читает `.env` из текущего каталога, поэтому он должен указывать
+  на папку с ботом.
+- `ExecStart` — Python из виртуального окружения, а не системный: иначе не найдутся
+  зависимости.
+- `User=wgbot` — служба работает без прав root. Права на VPN-сервере бот получает через
+  SSH, а не от локального пользователя.
+- `Restart=always` и `RestartSec=10` — при падении или потере сети бот перезапустится
+  через 10 секунд.
+- Блок ограничений можно убрать, если он мешает (например, ключ лежит вне `/opt/wg-bot`
+  в `/home` — тогда уберите `ProtectHome=true`).
+
+Включите автозапуск и запустите службу:
+
+```bash
+systemctl daemon-reload
+systemctl enable --now wg-bot
+systemctl status wg-bot
+```
+
+В статусе должно быть `active (running)`. Отправьте боту `/list` — он должен показать
+список клиентов.
+
+### Управление службой
+
+| Команда | Что делает |
+|---|---|
+| `systemctl status wg-bot` | состояние службы и последние строки лога |
+| `systemctl restart wg-bot` | перезапуск (нужен после изменения `.env`) |
+| `systemctl stop wg-bot` | остановить |
+| `systemctl disable --now wg-bot` | остановить и убрать из автозапуска |
+| `journalctl -u wg-bot -f` | смотреть лог в реальном времени |
+| `journalctl -u wg-bot -n 100 --no-pager` | последние 100 строк лога |
+| `journalctl -u wg-bot --since "1 hour ago"` | лог за последний час |
+
+После правки самого файла `wg-bot.service` выполните `systemctl daemon-reload` и
+`systemctl restart wg-bot`.
+
+### Обновление
+
+```bash
+cd /opt/wg-bot
+sudo -u wgbot git pull
+sudo -u wgbot .venv/bin/pip install -r requirements.txt
+systemctl restart wg-bot
+```
+
+`.env` и ключи не хранятся в git и при обновлении не меняются. Если в новой версии
+появились переменные, сравните свой `.env` с `.env.example`.
+
+### Если что-то не работает
+
+Сначала посмотрите лог: `journalctl -u wg-bot -n 50 --no-pager`.
+
+- **`Переменная окружения BOT_TOKEN не задана`** — `.env` не найден или не читается:
+  проверьте `WorkingDirectory` в службе и владельца файла (`ls -l /opt/wg-bot/.env`).
+- **`Укажите SSH_PASSWORD или SSH_KEY_PATH`** — для сервера задан `SSH_HOST`, но нет ни
+  пароля, ни ключа.
+- **`Ошибка SSH (...)`** в ответе бота — повторите проверку подключения из шага 3 от
+  пользователя службы: `sudo -u wgbot ssh -i /opt/wg-bot/.ssh/id_ed25519 ...`. Сообщение
+  `Host key is not trusted` значит, что сервера нет в `SSH_KNOWN_HOSTS` или его ключ
+  изменился.
+- **`sudo: a password is required`** — SSH-пользователь не root и у него нет `sudo` без
+  пароля (см. «Если SSH-пользователь не root»).
+- **`Conflict: terminated by other getUpdates request`** — с этим токеном запущен второй
+  экземпляр бота: забытый ручной запуск из шага 5 или бот на другой машине. Остановите
+  лишний.
+- **Бот отвечает «Доступ запрещён» вам самим** — ваш ID не попал в `ALLOWED_USER_IDS` или
+  служба не перезапущена после правки `.env`.
+- **Служба постоянно перезапускается** — бот падает при старте; причина видна в логе.
+
+### Запуск без службы (для разработки)
+
+Для проверки на своём компьютере достаточно запустить бота в терминале:
 
 ```bash
 python -m venv .venv
@@ -145,35 +402,8 @@ cp .env.example .env             # и заполнить
 python bot.py
 ```
 
-1. Создайте бота у [@BotFather](https://t.me/BotFather) и вставьте токен в `BOT_TOKEN`.
-2. Чтобы узнать свой Telegram ID, напишите что-нибудь боту: он ответит «Доступ запрещён»
-   и покажет ID. Добавьте его в `ALLOWED_USER_IDS` и перезапустите бота.
-3. Для SSH укажите `SSH_PASSWORD` или `SSH_KEY_PATH`. Пользователь должен быть `root`;
-   если это не root, бот выполняет команды через `sudo -n` (нужен sudo без пароля).
-
-## Запуск как службы (на Linux)
-
-Бота можно запускать на том же VPS — тогда `SSH_HOST=127.0.0.1`.
-
-`/etc/systemd/system/wg-bot.service`:
-
-```ini
-[Unit]
-Description=WireGuard Telegram bot
-After=network-online.target
-
-[Service]
-WorkingDirectory=/opt/wg-bot
-ExecStart=/opt/wg-bot/.venv/bin/python bot.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload && systemctl enable --now wg-bot
-```
+Бот работает, пока открыт терминал. Не запускайте его одновременно со службой на сервере с
+тем же токеном — Telegram отдаёт обновления только одному экземпляру.
 
 ## Безопасность
 
